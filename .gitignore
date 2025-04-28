@@ -1,0 +1,50 @@
+# Dependency directories
+node_modules/
+npm-debug.log
+yarn-debug.log
+yarn-error.log
+
+# Environment variables
+.env
+.env.local
+.env.development
+.env.test
+.env.production
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Debug files
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Build directories
+/dist
+/build
+/out
+
+# Coverage directory
+/coverage
+
+# Editor directories and files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Logs
+logs/
+*.log
+
+# Optional: package-lock.json if you're not committing it
+# package-lock.json
+
+# Optional: VS Code specific settings
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
