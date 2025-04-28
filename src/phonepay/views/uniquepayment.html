@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Secure Payment Page</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            margin: 0;
+            padding: 0;
+            background: #f4f4f4;
+            color: #333;
+        }
+        .container {
+            width: 100%;
+            max-width: 500px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #fff;
+            border-radius: 10px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            text-align: center;
+            color: #4a90e2;
+        }
+        .step {
+            margin-bottom: 20px;
+            padding: 20px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+        .step.active {
+            border-color: #4a90e2;
+            background: #f7f9ff;
+        }
+        .step.hidden {
+            display: none;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        input {
+            width: 100%;
+            padding: 10px;
+            margin-bottom: 15px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        button {
+            width: 100%;
+            padding: 12px;
+            background: #4a90e2;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: bold;
+        }
+        button:hover {
+            background: #357bd8;
+        }
+        .error {
+            color: #e74c3c;
+            margin-bottom: 10px;
+            font-size: 14px;
+        }
+        .success {
+            color: #2ecc71;
+            font-weight: bold;
+        }
+        .status-container {
+            text-align: center;
+            padding: 20px;
+            margin-top: 20px;
+            border-radius: 5px;
+        }
+        .status-pending {
+            background: #f9e79f;
+        }
+        .status-success {
+            background: #abebc6;
+        }
+        .status-failed {
+            background: #f5b7b1;
+        }
+        .direct-link {
+            text-align: center;
+            margin-top: 20px;
+        }
+        .direct-link a {
+            color: #4a90e2;
+            text-decoration: none;
+            font-weight: bold;
+        }
+        .direct-link a:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Secure Payment Process</h1>
+        
+        <div id="amountStep" class="step active">
+            <h2>Enter Payment Amount</h2>
+            <div id="amountError" class="error"></div>
+            <label for="amount">Amount (₹):</label>
+            <input type="number" id="amount" min="1" value="2" placeholder="Enter amount in rupees">
+            <button id="processPayment">Process Payment</button>
+        </div>
+        
+        <div id="processStep" class="step hidden">
+            <h2>Processing Payment</h2>
+            <p>Please wait while we process your payment...</p>
+            <div style="text-align: center;">
+                <div class="loader"></div>
+            </div>
+        </div>
+        
+        <div id="statusStep" class="step hidden">
+            <h2>Payment Status</h2>
+            <div id="statusContainer" class="status-container">
+                <p id="statusMessage">Your payment is being processed.</p>
+                <p id="statusDetails"></p>
+            </div>
+        </div>
+        
+        <div class="direct-link">
+            <p>Direct payment link: <a href="http://localhost:3000/upp">http://localhost:3000/upp</a></p>
+        </div>
+    </div>
+    
+    <script>
+        // DOM Elements
+        const amountStep = document.getElementById('amountStep');
+        const processStep = document.getElementById('processStep');
+        const statusStep = document.getElementById('statusStep');
+        const amountInput = document.getElementById('amount');
+        const processPaymentBtn = document.getElementById('processPayment');
+        const amountError = document.getElementById('amountError');
+        const statusContainer = document.getElementById('statusContainer');
+        const statusMessage = document.getElementById('statusMessage');
+        const statusDetails = document.getElementById('statusDetails');
+        
+        // Process Payment
+        processPaymentBtn.addEventListener('click', function() {
+            const amount = amountInput.value.trim();
+            
+            if (!amount || isNaN(amount) || amount <= 0) {
+                amountError.textContent = "Please enter a valid amount";
+                return;
+            }
+            
+            // Show processing step
+            amountError.textContent = "";
+            amountStep.classList.remove('active');
+            amountStep.classList.add('hidden');
+            processStep.classList.remove('hidden');
+            processStep.classList.add('active');
+            
+            // Generate random data for the order
+            const randomName = "Customer_" + Math.floor(Math.random() * 1000);
+            const randomMobile = "9" + Math.floor(Math.random() * 9000000000 + 1000000000);
+            
+            // Create order with PhonePe API
+            fetch('/api/phonepay/create-unique-order', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    name: randomName,
+                    mobileNumber: randomMobile,
+                    amount: parseFloat(amount)
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    window.location.href = data.redirectUrl;
+                } else {
+                    showStatus('failed', 'Payment creation failed', data.message || 'An error occurred');
+                }
+            })
+            .catch(error => {
+                showStatus('failed', 'Payment creation failed', error.message || 'An error occurred');
+            });
+        });
+        
+        // Function to display status
+        function showStatus(type, message, details) {
+            processStep.classList.remove('active');
+            processStep.classList.add('hidden');
+            statusStep.classList.remove('hidden');
+            statusStep.classList.add('active');
+            
+            statusContainer.className = 'status-container';
+            statusContainer.classList.add('status-' + type);
+            statusMessage.textContent = message;
+            statusDetails.textContent = details || '';
+        }
+        
+        // Check URL parameters for payment status
+        window.onload = function() {
+            const urlParams = new URLSearchParams(window.location.search);
+            const status = urlParams.get('status');
+            const details = urlParams.get('details');
+            
+            if (status) {
+                amountStep.classList.remove('active');
+                amountStep.classList.add('hidden');
+                statusStep.classList.remove('hidden');
+                statusStep.classList.add('active');
+                
+                if (status === 'success') {
+                    showStatus('success', 'Payment Successful', details);
+                } else if (status === 'pending') {
+                    showStatus('pending', 'Payment Pending', details);
+                } else if (status === 'failed') {
+                    showStatus('failed', 'Payment Failed', details);
+                }
+            }
+        };
+    </script>
+</body>
+</html>

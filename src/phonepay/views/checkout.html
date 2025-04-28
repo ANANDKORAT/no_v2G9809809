@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>PhonePe Checkout</title>
+    <!-- Updated to use the latest Mercury bundle as per PhonePe docs -->
+    <script src="https://mercury.phonepe.com/web/bundle/checkout.js"></script>
+    <style>
+        .payment-container {
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        #payment-frame-container {
+            width: 100%;
+            min-height: 600px;
+            border: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="payment-container">
+        <div id="payment-frame-container"></div>
+    </div>
+
+    <script>
+        // This will be populated by the server
+        window.onload = () => {
+            if (window.redirectUrl) {
+                // Use the PhonePeCheckout.transact function as per latest PhonePe documentation
+                PhonePeCheckout.transact({
+                    url: window.redirectUrl,
+                    mode: 'IFRAME',
+                    target: '#payment-frame-container',
+                    onSuccess: (response) => {
+                        console.log('Payment Success:', response);
+                        window.location.href = response.redirectUrl || window.location.origin + '/api/phonepay/status?txnId=' + window.transactionId;
+                    },
+                    onError: (error) => {
+                        console.error('Payment Error:', error);
+                        window.location.href = window.failureUrl || window.location.origin + '/api/phonepay/payment-failed';
+                    }
+                });
+            }
+        };
+    </script>
+</body>
+</html>
