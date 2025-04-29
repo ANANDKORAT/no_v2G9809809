@@ -789,7 +789,11 @@ const handlePaymentStatus = async (req, res) => {
   try {
     const { txnId } = req.query; // This is our orderId
     
+    console.log(`Payment status callback received for txnId: ${txnId}`);
+    console.log(`Full query parameters:`, JSON.stringify(req.query));
+    
     if (!txnId) {
+      console.error("Missing transaction ID in payment status callback");
       return res.status(400).json({
         success: false,
         message: "Transaction ID is required"
@@ -801,6 +805,8 @@ const handlePaymentStatus = async (req, res) => {
     
     // Check payment status with PhonePe
     const statusCheckUrl = `${BASE_URL}/checkout/v2/order/${txnId}/status`;
+    console.log(`Checking payment status at: ${statusCheckUrl}`);
+    
     const response = await axios.get(statusCheckUrl, { 
       headers: {
         "Authorization": `O-Bearer ${authToken}`,
@@ -809,48 +815,88 @@ const handlePaymentStatus = async (req, res) => {
     });
     
     const orderData = response.data;
-    console.log("Payment status data:", JSON.stringify(orderData, null, 2));
+    console.log(`Payment status data for ${txnId}:`, JSON.stringify(orderData, null, 2));
     
     // Get payment record from database
-    const paymentRecord = await paymentService.getPaymentByOrderId(txnId);
+    console.log(`Looking up payment record for orderId: ${txnId}`);
+    let paymentRecord = await paymentService.getPaymentByOrderId(txnId);
     
+    // If payment record doesn't exist, try to create one from PhonePe data
     if (!paymentRecord) {
-      return res.status(404).json({
-        success: false,
-        message: "Payment record not found"
-      });
+      console.warn(`Payment record not found for txnId: ${txnId}, attempting to create one`);
+      
+      // Extract domain from meta info if available
+      const domain = orderData.metaInfo?.udf1 || "unknown-domain.com";
+      
+      try {
+        paymentRecord = await paymentService.createPayment({
+          orderId: txnId,
+          domainName: domain,
+          amount: orderData.amount / 100, // Convert from paisa to rupees
+          paymentDetails: { 
+            phonepeResponse: orderData,
+            createdFromCallback: true,
+            createdAt: new Date().toISOString()
+          },
+          status: orderData.state === "COMPLETED" ? 'success' : 
+                  orderData.state === "FAILED" ? 'failed' : 'pending'
+        });
+        
+        console.log(`Created new payment record for ${txnId} with status: ${paymentRecord.status}`);
+      } catch (createError) {
+        console.error(`Failed to create payment record for ${txnId}:`, createError);
+      }
+    }
+    
+    // If we still don't have a payment record, redirect to a generic error page
+    if (!paymentRecord) {
+      console.error(`Payment record still not available for ${txnId}, redirecting to error page`);
+      return res.redirect(`/payment-error?txnId=${txnId}&reason=record_not_found`);
     }
     
     // Extract the domain name for redirection
     const domainName = paymentRecord.domainName;
+    console.log(`Domain for redirection: ${domainName}`);
     
     if (orderData.state === "COMPLETED") {
       // Payment successful
+      console.log(`Payment ${txnId} successful, updating status to 'success'`);
       await paymentService.updatePaymentStatus(txnId, 'success', {
         'paymentDetails.phonepeResponse': orderData
       });
       
       // Redirect to success page on client's domain
-      return res.redirect(`https://${domainName}/thankyou`);
+      const redirectUrl = `https://${domainName}/thankyou`;
+      console.log(`Redirecting to: ${redirectUrl}`);
+      return res.redirect(redirectUrl);
       
     } else {
       // Payment failed or other status
-      await paymentService.updatePaymentStatus(txnId, 
-        orderData.state === "FAILED" ? 'failed' : 'cancelled', 
-        { 'paymentDetails.phonepeResponse': orderData }
-      );
+      const newStatus = orderData.state === "FAILED" ? 'failed' : 'cancelled';
+      console.log(`Payment ${txnId} not completed, updating status to '${newStatus}'`);
+      
+      await paymentService.updatePaymentStatus(txnId, newStatus, { 
+        'paymentDetails.phonepeResponse': orderData 
+      });
       
       // Redirect to cart page for failed payments
-      return res.redirect(`https://${domainName}/cart`);
+      const redirectUrl = `https://${domainName}/cart`;
+      console.log(`Redirecting to: ${redirectUrl}`);
+      return res.redirect(redirectUrl);
     }
     
   } catch (error) {
     console.error("Error handling payment status:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Error processing payment status",
-      details: error.message
-    });
+    
+    if (error.response) {
+      console.error("PhonePe API response error:", JSON.stringify({
+        status: error.response.status,
+        data: error.response.data
+      }));
+    }
+    
+    // Fallback to a generic error page with details
+    return res.redirect(`/payment-error?reason=${encodeURIComponent(error.message)}`);
   }
 };
 
@@ -861,28 +907,75 @@ const handlePaymentCancelled = async (req, res) => {
   try {
     const { txnId } = req.query;
     
+    console.log(`Payment cancelled for transaction: ${txnId}`);
+    console.log(`Full query parameters:`, JSON.stringify(req.query));
+    
     if (!txnId) {
-      return res.status(400).json({
-        success: false,
-        message: "Transaction ID is required"
-      });
+      console.error("Missing transaction ID in payment cancelled callback");
+      return res.redirect('/payment-error?reason=missing_transaction_id');
     }
     
     // Get payment record
-    const paymentRecord = await paymentService.getPaymentByOrderId(txnId);
+    let paymentRecord = await paymentService.getPaymentByOrderId(txnId);
     
+    // If payment record doesn't exist, try to fetch details from PhonePe
     if (!paymentRecord) {
-      return res.status(404).json({
-        success: false,
-        message: "Payment record not found"
-      });
+      console.warn(`No payment record found for cancelled payment: ${txnId}`);
+      
+      try {
+        // Get auth token and check payment status with PhonePe
+        const authToken = await authService.getAuthToken();
+        const statusCheckUrl = `${BASE_URL}/checkout/v2/order/${txnId}/status`;
+        
+        console.log(`Checking PhonePe for cancelled payment details at ${statusCheckUrl}`);
+        const response = await axios.get(statusCheckUrl, { 
+          headers: {
+            "Authorization": `O-Bearer ${authToken}`,
+            "Content-Type": "application/json"
+          }
+        });
+        
+        const orderData = response.data;
+        
+        // Extract domain from meta info if available
+        const domain = orderData.metaInfo?.udf1 || "unknown-domain.com";
+        
+        // Create payment record from PhonePe data
+        paymentRecord = await paymentService.createPayment({
+          orderId: txnId,
+          domainName: domain,
+          amount: orderData.amount / 100, // Convert from paisa to rupees
+          paymentDetails: { 
+            phonepeResponse: orderData,
+            createdFromCancellation: true,
+            createdAt: new Date().toISOString()
+          },
+          status: 'cancelled'
+        });
+        
+        console.log(`Created payment record for cancelled payment: ${txnId}`);
+      } catch (error) {
+        console.error(`Failed to create payment record for cancelled payment ${txnId}:`, error);
+      }
     }
     
-    // Update payment status to cancelled
-    await paymentService.updatePaymentStatus(txnId, 'cancelled');
+    // If we have a payment record now, update it and redirect properly
+    if (paymentRecord) {
+      // Update payment status to cancelled if it's not already
+      if (paymentRecord.status !== 'cancelled') {
+        await paymentService.updatePaymentStatus(txnId, 'cancelled');
+        console.log(`Updated payment status to cancelled for ${txnId}`);
+      }
+      
+      // Redirect to cart page on client's domain
+      const redirectUrl = `https://${paymentRecord.domainName}/cart`;
+      console.log(`Redirecting to: ${redirectUrl}`);
+      return res.redirect(redirectUrl);
+    }
     
-    // Redirect to cart page on client's domain
-    return res.redirect(`https://${paymentRecord.domainName}/cart`);
+    // Fallback if we still don't have payment details
+    console.error(`Cannot process cancelled payment ${txnId} - No payment record available`);
+    return res.redirect('/payment-error?reason=cancelled_payment_not_found');
     
   } catch (error) {
     console.error("Error handling payment cancellation:", error);
@@ -900,7 +993,10 @@ const handlePaymentCancelled = async (req, res) => {
 const processPaymentRequest = async (req, res) => {
   try {
     // Extract parameters from query string
-    const { domain, amount, name, mobile } = req.query;
+    const { domain, amount, name, mobile, merchantOrderId } = req.query;
+    
+    // Log incoming parameters for debugging
+    console.log("processPaymentRequest received params:", { domain, amount, name, mobile, merchantOrderId });
     
     // Validate required parameters
     if (!domain) {
@@ -919,28 +1015,43 @@ const processPaymentRequest = async (req, res) => {
       });
     }
     
-    // Generate a unique order ID
-    const uniqueId = crypto.randomBytes(4).toString('hex');
-    const orderId = `URL-${Date.now()}-${uniqueId}`;
+    // Generate a unique order ID or use the provided merchantOrderId
+    const orderId = merchantOrderId || `URL-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
     
-    // Store payment in database
+    console.log(`Creating payment with orderId: ${orderId} for domain: ${domain}, amount: ${paymentAmount}`);
+    
+    // Determine the proper domain for redirects - handle localhost as a special case
+    const redirectDomain = domain === 'localhost' ? req.get('host').split(':')[0] : domain;
+    
+    // Store payment in database FIRST, before continuing
     try {
-      await paymentService.createPayment({
+      const savedPayment = await paymentService.createPayment({
         orderId,
         domainName: domain,
         amount: paymentAmount,
         paymentDetails: { 
           name: name || "Customer", 
           mobile: mobile || "",
-          source: "URL_PARAMS"
+          source: "URL_PARAMS",
+          createdAt: new Date().toISOString()
         }
       });
+      console.log(`Successfully created payment record in database with ID: ${savedPayment._id}`);
     } catch (dbError) {
-      console.error("Database error (non-critical, continuing with payment):", dbError);
+      // Log the error but continue with payment processing
+      // This is more permissive to allow payments even if DB operations fail
+      console.error("Database error while creating payment:", dbError);
     }
     
     // Get auth token for PhonePe API
     const authToken = await authService.getAuthToken();
+    if (!authToken) {
+      console.error("Failed to get auth token from PhonePe");
+      return res.status(500).json({
+        success: false, 
+        message: "Authentication failed with payment gateway"
+      });
+    }
     
     // Create payment payload for PhonePe
     const paymentPayload = {
@@ -956,6 +1067,7 @@ const processPaymentRequest = async (req, res) => {
         type: "PG_CHECKOUT",
         message: `Payment for ${domain}`,
         merchantUrls: {
+          // Use the current protocol and host for redirect URLs to ensure they work in all environments
           redirectUrl: `${req.protocol}://${req.get('host')}/api/phonepay/payment-status?txnId=${orderId}`,
           cancelUrl: `${req.protocol}://${req.get('host')}/api/phonepay/payment-cancelled?txnId=${orderId}`,
           notifyUrl: `${req.protocol}://${req.get('host')}/api/phonepay/notify`
@@ -992,8 +1104,19 @@ const processPaymentRequest = async (req, res) => {
       data: paymentPayload
     });
     
-    // Redirect user directly to the payment page
-    return res.redirect(response.data.redirectUrl);
+    console.log("PhonePe API response:", JSON.stringify(response.data, null, 2));
+    
+    if (response.data && response.data.redirectUrl) {
+      // For direct browser access, redirect the user to the PhonePe payment page
+      console.log(`Redirecting to PhonePe URL: ${response.data.redirectUrl}`);
+      return res.redirect(response.data.redirectUrl);
+    } else {
+      // This shouldn't happen, but just in case
+      return res.status(500).json({
+        success: false,
+        message: "No redirect URL received from payment gateway"
+      });
+    }
     
   } catch (error) {
     console.error("Error processing URL payment request:", error);
@@ -1009,6 +1132,91 @@ const processPaymentRequest = async (req, res) => {
       error: error.message
     });
   }
+};
+
+/**
+ * Handle payment error display
+ */
+const showPaymentError = (req, res) => {
+  const { reason, txnId } = req.query;
+  
+  const errorHtml = `
+  <!DOCTYPE html>
+  <html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Payment Error</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        flex-direction: column;
+        height: 100vh;
+        margin: 0;
+        background-color: #f7f7f7;
+      }
+      .error-container {
+        background-color: white;
+        padding: 30px;
+        border-radius: 8px;
+        box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        text-align: center;
+        max-width: 500px;
+        width: 90%;
+      }
+      .error-icon {
+        color: #ff4d4d;
+        font-size: 60px;
+        margin-bottom: 20px;
+      }
+      h1 {
+        color: #333;
+        margin-bottom: 20px;
+      }
+      .error-details {
+        color: #666;
+        margin-bottom: 30px;
+      }
+      .transaction-id {
+        font-size: 0.9em;
+        color: #888;
+        margin-bottom: 30px;
+        word-break: break-all;
+      }
+      .home-button {
+        background-color: #4d79ff;
+        color: white;
+        border: none;
+        padding: 12px 24px;
+        font-size: 16px;
+        border-radius: 4px;
+        cursor: pointer;
+        transition: background-color 0.3s;
+        text-decoration: none;
+      }
+      .home-button:hover {
+        background-color: #3a66ff;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="error-container">
+      <div class="error-icon">&#9888;</div>
+      <h1>Payment Error</h1>
+      <div class="error-details">
+        ${reason ? `Error: ${reason}` : 'An error occurred during payment processing.'}
+      </div>
+      ${txnId ? `<div class="transaction-id">Transaction ID: ${txnId}</div>` : ''}
+      <a href="/" class="home-button">Return to Home</a>
+    </div>
+  </body>
+  </html>
+  `;
+  
+  res.send(errorHtml);
 };
 
 // Export all the functions
@@ -1029,6 +1237,6 @@ module.exports = {
   processPaymentRequest,
   handlePaymentStatus,
   handlePaymentCancelled,
-  // Add the checkout payment function
-  processCheckoutPayment
+  // Add new function
+  showPaymentError
 };

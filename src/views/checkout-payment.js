@@ -212,11 +212,64 @@ function initPaymentButtons() {
   });
 }
 
+/**
+ * NEW: React-specific helper for PhonePe integration
+ * Use this in your React components
+ */
+const PhonePeReactHelper = {
+  // Initialize PhonePe checkout API config
+  init: function(options = {}) {
+    if (options.apiBaseUrl) config.apiBaseUrl = options.apiBaseUrl;
+    if (typeof options.debug === 'boolean') config.debug = options.debug;
+    debug('PhonePe React helper initialized with config:', config);
+  },
+  
+  // Make direct payment using window location redirect
+  // This is important for React - doesn't use fetch/AJAX which can cause issues
+  makePayment: function(params) {
+    return processDirectPayment(params);
+  },
+  
+  // Create a payment link that can be opened in new tab/window
+  getPaymentLink: function(params) {
+    try {
+      const queryParams = new URLSearchParams();
+      
+      // Add required parameters
+      if (!params.domain) throw new Error('Domain parameter is required');
+      queryParams.append('domain', params.domain);
+      
+      if (!params.amount || isNaN(parseFloat(params.amount)) || parseFloat(params.amount) <= 0) {
+        throw new Error('Valid amount parameter is required');
+      }
+      queryParams.append('amount', params.amount);
+      
+      // Add optional parameters
+      if (params.name) queryParams.append('name', params.name);
+      if (params.mobile) queryParams.append('mobile', params.mobile);
+      
+      // Add any additional parameters
+      Object.keys(params).forEach(key => {
+        if (!['domain', 'amount', 'name', 'mobile'].includes(key)) {
+          queryParams.append(key, params[key]);
+        }
+      });
+      
+      return `${config.apiBaseUrl}/process-payment?${queryParams.toString()}`;
+    } catch (error) {
+      debug('Error creating payment link', error.message);
+      return null;
+    }
+  }
+};
+
 // Expose global API for direct use in HTML
 window.PhonePeCheckout = {
   processDirectPayment,
   processAjaxPayment,
-  config
+  config,
+  // Add React helper
+  React: PhonePeReactHelper
 };
 
 // Initialize when DOM is ready

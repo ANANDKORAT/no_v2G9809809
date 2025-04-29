@@ -26,12 +26,20 @@ const app = express();
 // Set up middleware
 app.use(bodyParser.json());  // Parse JSON request bodies
 app.use(express.urlencoded({ extended: true }));  // Parse URL-encoded bodies
-// Configure CORS to allow cross-origin requests
+
+// Configure CORS to allow ALL cross-origin requests without restrictions
 app.use(cors({
-    origin: true,  // Allow all origins
-    credentials: true,  // Allow cookies to be sent
-    allowedHeaders: ["content-type", "authorization"]  // Allow these headers
+    origin: '*',                  // Allow any domain
+    methods: '*',                 // Allow all HTTP methods
+    allowedHeaders: '*',          // Allow all headers
+    exposedHeaders: '*',          // Expose all headers
+    credentials: true,            // Allow cookies
+    preflightContinue: true,      // Pass the preflight response to the next handler
+    optionsSuccessStatus: 204     // Return 204 for preflight requests
 }));
+
+// Add specific OPTIONS handler for all routes
+app.options('*', cors());  // Enable preflight for all routes
 
 // Serve static files from the views directory
 // This allows direct access to HTML, CSS, and client-side JS files
