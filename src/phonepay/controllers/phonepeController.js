@@ -3,6 +3,7 @@ const crypto = require("crypto");
 const path = require("path");
 const fs = require("fs");
 const authService = require("../services/authService");
+const paymentService = require("../services/paymentService");
 
 // Use only production URL
 const BASE_URL = "https://api.phonepe.com/apis/pg";
@@ -216,8 +217,29 @@ const handleWebhook = async (req, res) => {
     // Verify the signature if PhonePe provides one
     // This would depend on PhonePe's webhook implementation
     
-    // Process the payment notification
-    // Here you would update your database or perform business logic
+    // Extract the merchant order ID and status from the webhook payload
+    // Note: The actual structure depends on PhonePe's webhook format
+    const orderId = payload.merchantOrderId || payload.data?.merchantOrderId;
+    const paymentStatus = payload.code || payload.data?.state;
+    
+    if (orderId) {
+      // Map PhonePe status to our status format
+      let dbStatus = 'pending';
+      if (paymentStatus === 'PAYMENT_SUCCESS' || paymentStatus === 'COMPLETED') {
+        dbStatus = 'success';
+      } else if (paymentStatus === 'PAYMENT_ERROR' || paymentStatus === 'FAILED') {
+        dbStatus = 'failed';
+      } else if (paymentStatus === 'PAYMENT_CANCELLED' || paymentStatus === 'CANCELLED') {
+        dbStatus = 'cancelled';
+      }
+      
+      // Update payment status in database
+      await paymentService.updatePaymentStatus(orderId, dbStatus, {
+        'paymentDetails.webhookData': payload
+      });
+      
+      console.log(`Updated payment status to ${dbStatus} for order ${orderId}`);
+    }
     
     // Always return 200 to PhonePe to acknowledge receipt
     res.status(200).json({ status: "RECEIVED" });
@@ -470,6 +492,526 @@ const serveUniquePage = (req, res) => {
   }
 };
 
+const serveMultiPaymentPage = (req, res) => {
+  try {
+    // Check if a file exists for the multipayment page
+    const multiPaymentPath = path.join(__dirname, '../views/multipayment.html');
+    
+    // If the file exists, serve it
+    if (fs.existsSync(multiPaymentPath)) {
+      res.sendFile(multiPaymentPath);
+    } else {
+      // If the file doesn't exist, serve the uniquepayment.html as a fallback
+      console.warn("multipayment.html not found, serving uniquepayment.html instead");
+      res.sendFile(path.join(__dirname, '../views/uniquepayment.html'));
+    }
+  } catch (error) {
+    console.error("Error serving multi payment page:", error);
+    res.status(500).send("Error loading payment page");
+  }
+};
+
+/**
+ * Creates order via GET method for multipayment endpoint
+ */
+const createOrderGet = async (req, res) => {
+  try {
+    // Extract parameters from query string
+    const { name = "Guest", mobile = "9999999999", amount = 1 } = req.query;
+    
+    // Validate amount
+    const parsedAmount = parseFloat(amount);
+    if (isNaN(parsedAmount) || parsedAmount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid amount. Must be a number greater than 0",
+        details: `Received amount: ${amount}`
+      });
+    }
+
+    // Get auth token
+    const authToken = await authService.getAuthToken();
+    
+    // Generate a unique merchant order ID
+    const merchantOrderId = `MULTI-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+
+    // Create payment payload
+    const paymentPayload = {
+      merchantOrderId,
+      amount: Math.round(parsedAmount * 100), // Convert to paisa
+      expireAfter: 1800, // 30 minutes
+      metaInfo: {
+        udf1: name,
+        udf2: mobile,
+        udf3: "MULTI_PAYMENT"
+      },
+      paymentFlow: {
+        type: "PG_CHECKOUT",
+        message: `Multi Payment ${merchantOrderId}`,
+        merchantUrls: {
+          redirectUrl: `${req.protocol}://${req.get('host')}/api/phonepay/multi-status?txnId=${merchantOrderId}`,
+          cancelUrl: `${req.protocol}://${req.get('host')}/multipayment?status=failed&details=Payment%20was%20cancelled`,
+          notifyUrl: `${req.protocol}://${req.get('host')}/api/phonepay/notify`
+        },
+        paymentModeConfig: {
+          enabledPaymentModes: [
+            { type: "UPI_INTENT" },
+            { type: "UPI_COLLECT" },
+            { type: "UPI_QR" },
+            {
+              type: "CARD",
+              cardTypes: ["DEBIT_CARD", "CREDIT_CARD"]
+            }
+          ]
+        }
+      },
+      userInfo: {
+        name: name,
+        mobileNumber: mobile
+      }
+    };
+
+    console.log("Creating multi-payment order with payload:", JSON.stringify(paymentPayload, null, 2));
+
+    // Send request to PhonePe
+    const response = await axios({
+      method: "POST",
+      url: `${BASE_URL}/checkout/v2/pay`,
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `O-Bearer ${authToken}`
+      },
+      data: paymentPayload
+    });
+
+    // Redirect to the PhonePe payment URL
+    return res.redirect(response.data.redirectUrl);
+    
+  } catch (error) {
+    console.error("Error in GET create-order:");
+    
+    // Log error details
+    if (error.response) {
+      console.error("PhonePe API error response:", error.response.status);
+      console.error("Error data:", JSON.stringify(error.response.data));
+    } else {
+      console.error("Error message:", error.message);
+    }
+    
+    // Redirect to error page or show error message
+    return res.redirect(`/multipayment?status=failed&details=${encodeURIComponent(error.message || "Failed to create payment")}`);
+  }
+};
+
+/**
+ * Handle status updates for multi-payment orders
+ */
+const handleMultiStatus = async (req, res) => {
+  try {
+    const authToken = await authService.getAuthToken();
+    const { txnId } = req.query;
+
+    if (!txnId) {
+      return res.redirect('/multipayment?status=failed&details=Missing%20transaction%20ID');
+    }
+
+    const statusCheckUrl = `${BASE_URL}/checkout/v2/order/${txnId}/status`;
+    console.log(`Checking multi payment status for ${txnId}`);
+
+    const response = await axios.get(statusCheckUrl, { 
+      headers: {
+        "Authorization": `O-Bearer ${authToken}`,
+        "Content-Type": "application/json"
+      }
+    });
+
+    const orderData = response.data;
+    let status, details;
+
+    // Determine payment status
+    if (orderData.state === "COMPLETED") {
+      status = "success";
+      const paymentDetail = orderData.paymentDetails && orderData.paymentDetails.length > 0 ? 
+        orderData.paymentDetails[0] : null;
+      details = `Transaction ID: ${paymentDetail ? paymentDetail.transactionId : 'N/A'}, Amount: ₹${orderData.amount / 100}`;
+    } else if (orderData.state === "PENDING") {
+      status = "pending";
+      details = "Your payment is being processed";
+    } else {
+      status = "failed";
+      details = orderData.message || `Payment ${orderData.state || 'failed'}`;
+      if (orderData.errorCode) {
+        details += ` (Code: ${orderData.errorCode})`;
+      }
+    }
+
+    // Redirect back to the multipayment page with status
+    return res.redirect(`/multipayment?status=${status}&details=${encodeURIComponent(details)}`);
+    
+  } catch (error) {
+    console.error("Error checking multi payment status:", error.message);
+    let errorDetails = "Error processing payment";
+    
+    if (error.response) {
+      console.error("API Response Data:", JSON.stringify(error.response.data));
+      errorDetails = error.response.data?.message || errorDetails;
+    }
+    
+    return res.redirect(`/multipayment?status=failed&details=${encodeURIComponent(errorDetails)}`);
+  }
+};
+
+/**
+ * Process a payment request from checkout page
+ */
+const processCheckoutPayment = async (req, res) => {
+  try {
+    console.log("Received checkout payment request:", JSON.stringify(req.body));
+    
+    // Extract parameters from request body
+    const { domain, amount, name, mobile, ...otherDetails } = req.body;
+    
+    // Validate required parameters
+    if (!domain) {
+      return res.status(400).json({
+        success: false,
+        message: "Domain name is required"
+      });
+    }
+    
+    // Validate amount
+    const paymentAmount = parseFloat(amount);
+    if (isNaN(paymentAmount) || paymentAmount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Valid payment amount is required"
+      });
+    }
+    
+    // Generate a unique order ID
+    const uniqueId = crypto.randomBytes(4).toString('hex');
+    const orderId = `CHECKOUT-${Date.now()}-${uniqueId}`;
+    
+    // Try to store payment in database, but proceed even if it fails
+    try {
+      await paymentService.createPayment({
+        orderId,
+        domainName: domain,
+        amount: paymentAmount,
+        paymentDetails: { name, mobile, ...otherDetails }
+      });
+    } catch (dbError) {
+      // Log the error but continue with payment processing
+      console.error("Database error (non-critical, continuing with payment):", dbError);
+    }
+    
+    // Get auth token for PhonePe API
+    const authToken = await authService.getAuthToken();
+    
+    // Create payment payload for PhonePe
+    const paymentPayload = {
+      merchantOrderId: orderId,
+      amount: Math.round(paymentAmount * 100), // Convert to paisa
+      expireAfter: 1800, // 30 minutes
+      metaInfo: {
+        udf1: domain,
+        udf2: name || "Customer",
+        udf3: "CHECKOUT_PAYMENT"
+      },
+      paymentFlow: {
+        type: "PG_CHECKOUT",
+        message: `Payment for ${domain}`,
+        merchantUrls: {
+          redirectUrl: `${req.protocol}://${req.get('host')}/api/phonepay/payment-status?txnId=${orderId}`,
+          cancelUrl: `${req.protocol}://${req.get('host')}/api/phonepay/payment-cancelled?txnId=${orderId}`,
+          notifyUrl: `${req.protocol}://${req.get('host')}/api/phonepay/notify`
+        },
+        paymentModeConfig: {
+          enabledPaymentModes: [
+            { type: "UPI_INTENT" },
+            { type: "UPI_COLLECT" },
+            { type: "UPI_QR" },
+            { type: "NET_BANKING" },
+            {
+              type: "CARD",
+              cardTypes: ["DEBIT_CARD", "CREDIT_CARD"]
+            }
+          ]
+        }
+      },
+      userInfo: {
+        name: name || "Customer",
+        mobileNumber: mobile || ""
+      }
+    };
+    
+    console.log("Sending checkout payment request to PhonePe:", JSON.stringify(paymentPayload, null, 2));
+    
+    // Send request to PhonePe
+    const response = await axios({
+      method: "POST",
+      url: `${BASE_URL}/checkout/v2/pay`,
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `O-Bearer ${authToken}`
+      },
+      data: paymentPayload
+    });
+    
+    console.log("PhonePe API response:", JSON.stringify(response.data, null, 2));
+    
+    // Return redirect URL to frontend
+    return res.json({
+      success: true,
+      redirectUrl: response.data.redirectUrl,
+      orderId: orderId
+    });
+  } catch (error) {
+    console.error("Error processing checkout payment:", error);
+    if (error.response) {
+      console.error("API response status:", error.response.status);
+      console.error("API response data:", JSON.stringify(error.response.data, null, 2));
+    }
+    
+    return res.status(500).json({
+      success: false,
+      message: "Failed to process checkout payment",
+      error: error.message
+    });
+  }
+};
+
+/**
+ * Handle payment status update from PhonePe
+ * Update database and redirect user based on payment status
+ */
+const handlePaymentStatus = async (req, res) => {
+  try {
+    const { txnId } = req.query; // This is our orderId
+    
+    if (!txnId) {
+      return res.status(400).json({
+        success: false,
+        message: "Transaction ID is required"
+      });
+    }
+    
+    // Get auth token
+    const authToken = await authService.getAuthToken();
+    
+    // Check payment status with PhonePe
+    const statusCheckUrl = `${BASE_URL}/checkout/v2/order/${txnId}/status`;
+    const response = await axios.get(statusCheckUrl, { 
+      headers: {
+        "Authorization": `O-Bearer ${authToken}`,
+        "Content-Type": "application/json"
+      }
+    });
+    
+    const orderData = response.data;
+    console.log("Payment status data:", JSON.stringify(orderData, null, 2));
+    
+    // Get payment record from database
+    const paymentRecord = await paymentService.getPaymentByOrderId(txnId);
+    
+    if (!paymentRecord) {
+      return res.status(404).json({
+        success: false,
+        message: "Payment record not found"
+      });
+    }
+    
+    // Extract the domain name for redirection
+    const domainName = paymentRecord.domainName;
+    
+    if (orderData.state === "COMPLETED") {
+      // Payment successful
+      await paymentService.updatePaymentStatus(txnId, 'success', {
+        'paymentDetails.phonepeResponse': orderData
+      });
+      
+      // Redirect to success page on client's domain
+      return res.redirect(`https://${domainName}/thankyou`);
+      
+    } else {
+      // Payment failed or other status
+      await paymentService.updatePaymentStatus(txnId, 
+        orderData.state === "FAILED" ? 'failed' : 'cancelled', 
+        { 'paymentDetails.phonepeResponse': orderData }
+      );
+      
+      // Redirect to cart page for failed payments
+      return res.redirect(`https://${domainName}/cart`);
+    }
+    
+  } catch (error) {
+    console.error("Error handling payment status:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Error processing payment status",
+      details: error.message
+    });
+  }
+};
+
+/**
+ * Handle cancelled payments
+ */
+const handlePaymentCancelled = async (req, res) => {
+  try {
+    const { txnId } = req.query;
+    
+    if (!txnId) {
+      return res.status(400).json({
+        success: false,
+        message: "Transaction ID is required"
+      });
+    }
+    
+    // Get payment record
+    const paymentRecord = await paymentService.getPaymentByOrderId(txnId);
+    
+    if (!paymentRecord) {
+      return res.status(404).json({
+        success: false,
+        message: "Payment record not found"
+      });
+    }
+    
+    // Update payment status to cancelled
+    await paymentService.updatePaymentStatus(txnId, 'cancelled');
+    
+    // Redirect to cart page on client's domain
+    return res.redirect(`https://${paymentRecord.domainName}/cart`);
+    
+  } catch (error) {
+    console.error("Error handling payment cancellation:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Error handling payment cancellation",
+      details: error.message
+    });
+  }
+};
+
+/**
+ * Process a payment request from URL parameters
+ */
+const processPaymentRequest = async (req, res) => {
+  try {
+    // Extract parameters from query string
+    const { domain, amount, name, mobile } = req.query;
+    
+    // Validate required parameters
+    if (!domain) {
+      return res.status(400).json({
+        success: false,
+        message: "Domain name is required"
+      });
+    }
+    
+    // Validate amount
+    const paymentAmount = parseFloat(amount);
+    if (isNaN(paymentAmount) || paymentAmount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Valid payment amount is required"
+      });
+    }
+    
+    // Generate a unique order ID
+    const uniqueId = crypto.randomBytes(4).toString('hex');
+    const orderId = `URL-${Date.now()}-${uniqueId}`;
+    
+    // Store payment in database
+    try {
+      await paymentService.createPayment({
+        orderId,
+        domainName: domain,
+        amount: paymentAmount,
+        paymentDetails: { 
+          name: name || "Customer", 
+          mobile: mobile || "",
+          source: "URL_PARAMS"
+        }
+      });
+    } catch (dbError) {
+      console.error("Database error (non-critical, continuing with payment):", dbError);
+    }
+    
+    // Get auth token for PhonePe API
+    const authToken = await authService.getAuthToken();
+    
+    // Create payment payload for PhonePe
+    const paymentPayload = {
+      merchantOrderId: orderId,
+      amount: Math.round(paymentAmount * 100), // Convert to paisa
+      expireAfter: 1800, // 30 minutes
+      metaInfo: {
+        udf1: domain,
+        udf2: name || "Customer",
+        udf3: "URL_PAYMENT"
+      },
+      paymentFlow: {
+        type: "PG_CHECKOUT",
+        message: `Payment for ${domain}`,
+        merchantUrls: {
+          redirectUrl: `${req.protocol}://${req.get('host')}/api/phonepay/payment-status?txnId=${orderId}`,
+          cancelUrl: `${req.protocol}://${req.get('host')}/api/phonepay/payment-cancelled?txnId=${orderId}`,
+          notifyUrl: `${req.protocol}://${req.get('host')}/api/phonepay/notify`
+        },
+        paymentModeConfig: {
+          enabledPaymentModes: [
+            { type: "UPI_INTENT" },
+            { type: "UPI_COLLECT" },
+            { type: "UPI_QR" },
+            { type: "NET_BANKING" },
+            {
+              type: "CARD",
+              cardTypes: ["DEBIT_CARD", "CREDIT_CARD"]
+            }
+          ]
+        }
+      },
+      userInfo: {
+        name: name || "Customer",
+        mobileNumber: mobile || ""
+      }
+    };
+    
+    console.log("Processing URL payment request to PhonePe:", JSON.stringify(paymentPayload, null, 2));
+    
+    // Send request to PhonePe
+    const response = await axios({
+      method: "POST",
+      url: `${BASE_URL}/checkout/v2/pay`,
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `O-Bearer ${authToken}`
+      },
+      data: paymentPayload
+    });
+    
+    // Redirect user directly to the payment page
+    return res.redirect(response.data.redirectUrl);
+    
+  } catch (error) {
+    console.error("Error processing URL payment request:", error);
+    if (error.response) {
+      console.error("API response status:", error.response.status);
+      console.error("API response data:", JSON.stringify(error.response.data, null, 2));
+    }
+    
+    // Send error response
+    return res.status(500).json({
+      success: false,
+      message: "Failed to process payment request",
+      error: error.message
+    });
+  }
+};
+
+// Export all the functions
 module.exports = {
   createOrder,
   createOrderToken,
@@ -479,5 +1021,14 @@ module.exports = {
   createUniqueOrder,
   handleUniqueStatus,
   serveUniquePage,
-  handleWebhook  // Export the new webhook handler
+  handleWebhook,
+  serveMultiPaymentPage,
+  createOrderGet,
+  handleMultiStatus,
+  // Payment flow functions
+  processPaymentRequest,
+  handlePaymentStatus,
+  handlePaymentCancelled,
+  // Add the checkout payment function
+  processCheckoutPayment
 };

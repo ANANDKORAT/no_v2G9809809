@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Multiple Payment Methods</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            margin: 0;
+            padding: 0;
+            background: #f4f4f4;
+            color: #333;
+        }
+        .container {
+            width: 100%;
+            max-width: 500px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #fff;
+            border-radius: 10px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            text-align: center;
+            color: #5f259f;
+        }
+        .step {
+            margin-bottom: 20px;
+            padding: 20px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+        .step.active {
+            border-color: #5f259f;
+            background: #f7f9ff;
+        }
+        .step.hidden {
+            display: none;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        input {
+            width: 100%;
+            padding: 10px;
+            margin-bottom: 15px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        button, .pay-link {
+            width: 100%;
+            padding: 12px;
+            background: #5f259f;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: bold;
+            text-align: center;
+            text-decoration: none;
+            display: inline-block;
+            margin-top: 10px;
+            box-sizing: border-box;
+        }
+        button:hover, .pay-link:hover {
+            background: #4a1c7c;
+        }
+        .error {
+            color: #e74c3c;
+            margin-bottom: 10px;
+            font-size: 14px;
+        }
+        .success {
+            color: #2ecc71;
+            font-weight: bold;
+        }
+        .status-container {
+            text-align: center;
+            padding: 20px;
+            margin-top: 20px;
+            border-radius: 5px;
+        }
+        .status-pending {
+            background: #f9e79f;
+        }
+        .status-success {
+            background: #abebc6;
+        }
+        .status-failed {
+            background: #f5b7b1;
+        }
+        .url-container {
+            margin-top: 20px;
+            padding: 10px;
+            background: #eee;
+            border-radius: 5px;
+            text-align: center;
+            word-break: break-all;
+        }
+        .logo {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        .logo img {
+            height: 40px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="logo">
+            <img src="https://www.phonepe.com/webstatic/static/901addb62ebdb897d858aaeb6d6ea6a4.svg" alt="PhonePe Logo">
+        </div>
+        <h1>Quick Payment</h1>
+        
+        <div id="paymentStep" class="step active">
+            <h2>Enter Payment Details</h2>
+            <div id="paymentError" class="error"></div>
+            
+            <form id="paymentForm" action="/api/phonepay/create-order-get" method="GET">
+                <label for="name">Name:</label>
+                <input type="text" id="name" name="name" placeholder="Enter your name" value="Customer">
+                
+                <label for="mobile">Mobile Number:</label>
+                <input type="tel" id="mobile" name="mobile" placeholder="Enter mobile number" value="9999999999" pattern="[0-9]{10}">
+                
+                <label for="amount">Amount (₹):</label>
+                <input type="number" id="amount" name="amount" min="1" value="1" placeholder="Enter amount in rupees">
+                
+                <button type="submit">Pay Now</button>
+            </form>
+            
+            <div class="url-container">
+                <p><strong>Direct payment URL format:</strong></p>
+                <p id="directUrl">/api/phonepay/create-order-get?name=Customer&mobile=9999999999&amount=1</p>
+                <a href="#" id="copyLink" class="pay-link">Copy Link</a>
+            </div>
+        </div>
+        
+        <div id="statusStep" class="step hidden">
+            <h2>Payment Status</h2>
+            <div id="statusContainer" class="status-container">
+                <p id="statusMessage">Your payment is being processed.</p>
+                <p id="statusDetails"></p>
+            </div>
+            <button id="newPayment">Make Another Payment</button>
+        </div>
+    </div>
+    
+    <script>
+        // DOM Elements
+        const paymentStep = document.getElementById('paymentStep');
+        const statusStep = document.getElementById('statusStep');
+        const nameInput = document.getElementById('name');
+        const mobileInput = document.getElementById('mobile');
+        const amountInput = document.getElementById('amount');
+        const directUrlDisplay = document.getElementById('directUrl');
+        const copyLinkBtn = document.getElementById('copyLink');
+        const statusContainer = document.getElementById('statusContainer');
+        const statusMessage = document.getElementById('statusMessage');
+        const statusDetails = document.getElementById('statusDetails');
+        const newPaymentBtn = document.getElementById('newPayment');
+        
+        // Update direct URL when inputs change
+        function updateDirectUrl() {
+            const name = encodeURIComponent(nameInput.value || 'Customer');
+            const mobile = encodeURIComponent(mobileInput.value || '9999999999');
+            const amount = encodeURIComponent(amountInput.value || '1');
+            const url = `/api/phonepay/create-order-get?name=${name}&mobile=${mobile}&amount=${amount}`;
+            directUrlDisplay.textContent = url;
+        }
+        
+        // Add event listeners to inputs
+        nameInput.addEventListener('input', updateDirectUrl);
+        mobileInput.addEventListener('input', updateDirectUrl);
+        amountInput.addEventListener('input', updateDirectUrl);
+        
+        // Copy link to clipboard
+        copyLinkBtn.addEventListener('click', function(e) {
+            e.preventDefault();
+            const url = window.location.origin + directUrlDisplay.textContent;
+            navigator.clipboard.writeText(url).then(() => {
+                copyLinkBtn.textContent = 'Copied!';
+                setTimeout(() => {
+                    copyLinkBtn.textContent = 'Copy Link';
+                }, 2000);
+            });
+        });
+        
+        // Function to display status
+        function showStatus(type, message, details) {
+            paymentStep.classList.remove('active');
+            paymentStep.classList.add('hidden');
+            statusStep.classList.remove('hidden');
+            statusStep.classList.add('active');
+            
+            statusContainer.className = 'status-container';
+            statusContainer.classList.add('status-' + type);
+            statusMessage.textContent = message;
+            statusDetails.textContent = details || '';
+        }
+        
+        // New payment button
+        newPaymentBtn.addEventListener('click', function() {
+            statusStep.classList.remove('active');
+            statusStep.classList.add('hidden');
+            paymentStep.classList.remove('hidden');
+            paymentStep.classList.add('active');
+        });
+        
+        // Check URL parameters for payment status
+        window.onload = function() {
+            const urlParams = new URLSearchParams(window.location.search);
+            const status = urlParams.get('status');
+            const details = urlParams.get('details');
+            
+            if (status) {
+                if (status === 'success') {
+                    showStatus('success', 'Payment Successful', details);
+                } else if (status === 'pending') {
+                    showStatus('pending', 'Payment Pending', details);
+                } else if (status === 'failed') {
+                    showStatus('failed', 'Payment Failed', details);
+                }
+            }
+            
+            updateDirectUrl();
+        };
+    </script>
+</body>
+</html>
