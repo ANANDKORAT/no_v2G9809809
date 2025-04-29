@@ -131,7 +131,7 @@
         </div>
         
         <div class="direct-link">
-            <p>Direct payment link: <a href="http://localhost:3000/upp">http://localhost:3000/upp</a></p>
+            <p>Direct payment link: <a id="directPaymentLink" href="/upp">/upp</a></p>
         </div>
     </div>
     
@@ -146,6 +146,12 @@
         const statusContainer = document.getElementById('statusContainer');
         const statusMessage = document.getElementById('statusMessage');
         const statusDetails = document.getElementById('statusDetails');
+        const directPaymentLink = document.getElementById('directPaymentLink');
+        
+        // Update direct payment link with current hostname
+        const currentHost = window.location.protocol + '//' + window.location.host;
+        directPaymentLink.href = currentHost + '/upp';
+        directPaymentLink.textContent = currentHost + '/upp';
         
         // Process Payment
         processPaymentBtn.addEventListener('click', function() {

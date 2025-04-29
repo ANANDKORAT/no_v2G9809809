@@ -34,49 +34,57 @@ const {
 
 // Standard payment flow endpoints
 // POST /api/phonepay/create-order - Creates a new payment order
-router.post("/create-order", openCors, createOrder);
+router.post("/create-order", createOrder);
+
 // POST /api/phonepay/create-order-token - Creates a payment token for client integration
-router.post("/create-order-token", openCors, createOrderToken);
+router.post("/create-order-token", createOrderToken);
+
 // GET /api/phonepay/status - Checks payment status and redirects accordingly
-router.get("/status", openCors, getStatus);
+router.get("/status", getStatus);
+
 // GET /api/phonepay/payment-failed - Handles failed payment redirection
-router.get("/payment-failed", openCors, handlePaymentFailed);
+router.get("/payment-failed", handlePaymentFailed);
+
 // GET /api/phonepay/order-status/:merchantOrderId - Gets detailed order status
-router.get("/order-status/:merchantOrderId", openCors, getOrderStatus);
+router.get("/order-status/:merchantOrderId", getOrderStatus);
 
 // PhonePe Webhook endpoint
 // POST /api/phonepay/notify - Receives payment notifications from PhonePe
-router.post("/notify", openCors, handleWebhook);
+router.post("/notify", handleWebhook);
 
 // Unique payment flow endpoints (simplified one-off payments)
 // POST /api/phonepay/create-unique-order - Creates a unique payment order
-router.post("/create-unique-order", openCors, createUniqueOrder);
+router.post("/create-unique-order", createUniqueOrder);
+
 // GET /api/phonepay/unique-status - Handles status updates for unique payment flow
-router.get("/unique-status", openCors, handleUniqueStatus);
+router.get("/unique-status", handleUniqueStatus);
 
 // Multi-payment flow endpoints (supports GET requests for easy integration)
 // GET /api/phonepay/create-order-get - Creates order via GET (for sharable links)
-router.get("/create-order-get", openCors, createOrderGet);
+router.get("/create-order-get", createOrderGet);
+
 // GET /api/phonepay/multi-status - Handles status for multi-payment flow
-router.get("/multi-status", openCors, handleMultiStatus);
+router.get("/multi-status", handleMultiStatus);
 
 // New routes for the custom payment flow
 // GET /api/phonepay/process-payment - Processes payment data from frontend
-router.get("/process-payment", openCors, processPaymentRequest);
+router.get("/process-payment", processPaymentRequest);
+
 // GET /api/phonepay/payment-status - Handles payment status and redirects user accordingly
-router.get("/payment-status", openCors, handlePaymentStatus);
+router.get("/payment-status", handlePaymentStatus);
+
 // GET /api/phonepay/payment-cancelled - Handles payment cancellations
-router.get("/payment-cancelled", openCors, handlePaymentCancelled);
+router.get("/payment-cancelled", handlePaymentCancelled);
 
 // Checkout payment integration endpoint
 // POST /api/phonepay/checkout-payment - Processes payment from checkout page
-router.post("/checkout-payment", openCors, processCheckoutPayment);
+router.post("/checkout-payment", processCheckoutPayment);
 
 // Error handling page
 // GET /api/phonepay/payment-error - Shows payment error page
-router.get("/payment-error", openCors, showPaymentError);
+router.get("/payment-error", showPaymentError);
 
 // Add OPTIONS handling for all routes to support preflight requests
-router.options("*", openCors);
+router.options("*", cors());
 
 module.exports = router;

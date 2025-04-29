@@ -698,7 +698,16 @@ const processCheckoutPayment = async (req, res) => {
         orderId,
         domainName: domain,
         amount: paymentAmount,
-        paymentDetails: { name, mobile, ...otherDetails }
+        paymentDetails: { 
+          name, 
+          mobile, 
+          ...otherDetails,
+          queryParams: {
+            domain,
+            amount: paymentAmount,
+            merchantOrderId: orderId
+          }
+        }
       });
     } catch (dbError) {
       // Log the error but continue with payment processing
@@ -773,6 +782,7 @@ const processCheckoutPayment = async (req, res) => {
       console.error("API response data:", JSON.stringify(error.response.data, null, 2));
     }
     
+    // Send error response
     return res.status(500).json({
       success: false,
       message: "Failed to process checkout payment",
@@ -781,13 +791,9 @@ const processCheckoutPayment = async (req, res) => {
   }
 };
 
-/**
- * Handle payment status update from PhonePe
- * Update database and redirect user based on payment status
- */
 const handlePaymentStatus = async (req, res) => {
   try {
-    const { txnId } = req.query; // This is our orderId
+    const { txnId, clientDomain } = req.query; // Get both txnId and clientDomain
     
     console.log(`Payment status callback received for txnId: ${txnId}`);
     console.log(`Full query parameters:`, JSON.stringify(req.query));
@@ -825,8 +831,8 @@ const handlePaymentStatus = async (req, res) => {
     if (!paymentRecord) {
       console.warn(`Payment record not found for txnId: ${txnId}, attempting to create one`);
       
-      // Extract domain from meta info if available
-      const domain = orderData.metaInfo?.udf1 || "unknown-domain.com";
+      // Extract domain from clientDomain parameter or meta info
+      const domain = clientDomain || orderData.metaInfo?.udf1 || "unknown-domain.com";
       
       try {
         paymentRecord = await paymentService.createPayment({
@@ -836,7 +842,13 @@ const handlePaymentStatus = async (req, res) => {
           paymentDetails: { 
             phonepeResponse: orderData,
             createdFromCallback: true,
-            createdAt: new Date().toISOString()
+            createdAt: new Date().toISOString(),
+            // Store the three required parameters explicitly
+            queryParams: {
+              domain: domain,
+              amount: orderData.amount / 100,
+              merchantOrderId: txnId
+            }
           },
           status: orderData.state === "COMPLETED" ? 'success' : 
                   orderData.state === "FAILED" ? 'failed' : 'pending'
@@ -854,35 +866,62 @@ const handlePaymentStatus = async (req, res) => {
       return res.redirect(`/payment-error?txnId=${txnId}&reason=record_not_found`);
     }
     
-    // Extract the domain name for redirection
-    const domainName = paymentRecord.domainName;
+    // Extract the domain name for redirection - use clientDomain parameter if available
+    const domainName = clientDomain || paymentRecord.domainName;
     console.log(`Domain for redirection: ${domainName}`);
     
-    if (orderData.state === "COMPLETED") {
-      // Payment successful
-      console.log(`Payment ${txnId} successful, updating status to 'success'`);
-      await paymentService.updatePaymentStatus(txnId, 'success', {
-        'paymentDetails.phonepeResponse': orderData
-      });
+    // Update status in the database no matter what
+    const newStatus = orderData.state === "COMPLETED" ? 'success' : 
+                      orderData.state === "FAILED" ? 'failed' : 'cancelled';
+    
+    // Store payment details including transaction details from PhonePe
+    const paymentDetailsToUpdate = {
+      'paymentDetails.phonepeResponse': orderData,
+      'paymentDetails.status': newStatus,
+      'paymentDetails.lastUpdated': new Date().toISOString()
+    };
+
+    // If it's a successful payment, store additional useful information
+    if (newStatus === 'success' && orderData.paymentDetails && orderData.paymentDetails.length > 0) {
+      const paymentDetail = orderData.paymentDetails[0];
+      paymentDetailsToUpdate['paymentDetails.transactionId'] = paymentDetail.transactionId || '';
+      paymentDetailsToUpdate['paymentDetails.providerReferenceId'] = paymentDetail.providerReferenceId || '';
+      paymentDetailsToUpdate['paymentDetails.paymentMode'] = paymentDetail.paymentMode || '';
+    }
+    
+    console.log(`Updating payment status to '${newStatus}' for ${txnId}`);
+    await paymentService.updatePaymentStatus(txnId, newStatus, paymentDetailsToUpdate);
+    
+    // Based on domain, decide how to handle the redirect
+    if (domainName.includes('.')) {
+      // This appears to be an external domain, add protocol and proper path
+      let baseUrl = domainName;
+      if (!baseUrl.startsWith('http')) {
+        baseUrl = `https://${baseUrl}`;
+      }
       
-      // Redirect to success page on client's domain
-      const redirectUrl = `https://${domainName}/thankyou`;
-      console.log(`Redirecting to: ${redirectUrl}`);
+      let redirectUrl = '';
+      if (orderData.state === "COMPLETED") {
+        // Success - send to thankyou page
+        redirectUrl = `${baseUrl}/thankyou`;
+      } else {
+        // Failed or other - send to cart page
+        redirectUrl = `${baseUrl}/cart`;
+      }
+      
+      console.log(`Redirecting to external domain: ${redirectUrl}`);
       return res.redirect(redirectUrl);
-      
     } else {
-      // Payment failed or other status
-      const newStatus = orderData.state === "FAILED" ? 'failed' : 'cancelled';
-      console.log(`Payment ${txnId} not completed, updating status to '${newStatus}'`);
+      // This is likely a path on our own server
+      let redirectPath = '';
+      if (orderData.state === "COMPLETED") {
+        redirectPath = `/?status=success&txnId=${txnId}`;
+      } else {
+        redirectPath = `/?status=failed&txnId=${txnId}`;
+      }
       
-      await paymentService.updatePaymentStatus(txnId, newStatus, { 
-        'paymentDetails.phonepeResponse': orderData 
-      });
-      
-      // Redirect to cart page for failed payments
-      const redirectUrl = `https://${domainName}/cart`;
-      console.log(`Redirecting to: ${redirectUrl}`);
-      return res.redirect(redirectUrl);
+      console.log(`Redirecting to internal path: ${redirectPath}`);
+      return res.redirect(redirectPath);
     }
     
   } catch (error) {
@@ -901,7 +940,7 @@ const handlePaymentStatus = async (req, res) => {
 };
 
 /**
- * Handle cancelled payments
+ * Handle payment cancellation from PhonePe
  */
 const handlePaymentCancelled = async (req, res) => {
   try {
@@ -987,156 +1026,6 @@ const handlePaymentCancelled = async (req, res) => {
   }
 };
 
-/**
- * Process a payment request from URL parameters
- */
-const processPaymentRequest = async (req, res) => {
-  try {
-    // Extract parameters from query string
-    const { domain, amount, name, mobile, merchantOrderId } = req.query;
-    
-    // Log incoming parameters for debugging
-    console.log("processPaymentRequest received params:", { domain, amount, name, mobile, merchantOrderId });
-    
-    // Validate required parameters
-    if (!domain) {
-      return res.status(400).json({
-        success: false,
-        message: "Domain name is required"
-      });
-    }
-    
-    // Validate amount
-    const paymentAmount = parseFloat(amount);
-    if (isNaN(paymentAmount) || paymentAmount <= 0) {
-      return res.status(400).json({
-        success: false,
-        message: "Valid payment amount is required"
-      });
-    }
-    
-    // Generate a unique order ID or use the provided merchantOrderId
-    const orderId = merchantOrderId || `URL-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
-    
-    console.log(`Creating payment with orderId: ${orderId} for domain: ${domain}, amount: ${paymentAmount}`);
-    
-    // Determine the proper domain for redirects - handle localhost as a special case
-    const redirectDomain = domain === 'localhost' ? req.get('host').split(':')[0] : domain;
-    
-    // Store payment in database FIRST, before continuing
-    try {
-      const savedPayment = await paymentService.createPayment({
-        orderId,
-        domainName: domain,
-        amount: paymentAmount,
-        paymentDetails: { 
-          name: name || "Customer", 
-          mobile: mobile || "",
-          source: "URL_PARAMS",
-          createdAt: new Date().toISOString()
-        }
-      });
-      console.log(`Successfully created payment record in database with ID: ${savedPayment._id}`);
-    } catch (dbError) {
-      // Log the error but continue with payment processing
-      // This is more permissive to allow payments even if DB operations fail
-      console.error("Database error while creating payment:", dbError);
-    }
-    
-    // Get auth token for PhonePe API
-    const authToken = await authService.getAuthToken();
-    if (!authToken) {
-      console.error("Failed to get auth token from PhonePe");
-      return res.status(500).json({
-        success: false, 
-        message: "Authentication failed with payment gateway"
-      });
-    }
-    
-    // Create payment payload for PhonePe
-    const paymentPayload = {
-      merchantOrderId: orderId,
-      amount: Math.round(paymentAmount * 100), // Convert to paisa
-      expireAfter: 1800, // 30 minutes
-      metaInfo: {
-        udf1: domain,
-        udf2: name || "Customer",
-        udf3: "URL_PAYMENT"
-      },
-      paymentFlow: {
-        type: "PG_CHECKOUT",
-        message: `Payment for ${domain}`,
-        merchantUrls: {
-          // Use the current protocol and host for redirect URLs to ensure they work in all environments
-          redirectUrl: `${req.protocol}://${req.get('host')}/api/phonepay/payment-status?txnId=${orderId}`,
-          cancelUrl: `${req.protocol}://${req.get('host')}/api/phonepay/payment-cancelled?txnId=${orderId}`,
-          notifyUrl: `${req.protocol}://${req.get('host')}/api/phonepay/notify`
-        },
-        paymentModeConfig: {
-          enabledPaymentModes: [
-            { type: "UPI_INTENT" },
-            { type: "UPI_COLLECT" },
-            { type: "UPI_QR" },
-            { type: "NET_BANKING" },
-            {
-              type: "CARD",
-              cardTypes: ["DEBIT_CARD", "CREDIT_CARD"]
-            }
-          ]
-        }
-      },
-      userInfo: {
-        name: name || "Customer",
-        mobileNumber: mobile || ""
-      }
-    };
-    
-    console.log("Processing URL payment request to PhonePe:", JSON.stringify(paymentPayload, null, 2));
-    
-    // Send request to PhonePe
-    const response = await axios({
-      method: "POST",
-      url: `${BASE_URL}/checkout/v2/pay`,
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `O-Bearer ${authToken}`
-      },
-      data: paymentPayload
-    });
-    
-    console.log("PhonePe API response:", JSON.stringify(response.data, null, 2));
-    
-    if (response.data && response.data.redirectUrl) {
-      // For direct browser access, redirect the user to the PhonePe payment page
-      console.log(`Redirecting to PhonePe URL: ${response.data.redirectUrl}`);
-      return res.redirect(response.data.redirectUrl);
-    } else {
-      // This shouldn't happen, but just in case
-      return res.status(500).json({
-        success: false,
-        message: "No redirect URL received from payment gateway"
-      });
-    }
-    
-  } catch (error) {
-    console.error("Error processing URL payment request:", error);
-    if (error.response) {
-      console.error("API response status:", error.response.status);
-      console.error("API response data:", JSON.stringify(error.response.data, null, 2));
-    }
-    
-    // Send error response
-    return res.status(500).json({
-      success: false,
-      message: "Failed to process payment request",
-      error: error.message
-    });
-  }
-};
-
-/**
- * Handle payment error display
- */
 const showPaymentError = (req, res) => {
   const { reason, txnId } = req.query;
   
@@ -1219,7 +1108,309 @@ const showPaymentError = (req, res) => {
   res.send(errorHtml);
 };
 
-// Export all the functions
+/**
+ * Process a payment request from URL parameters
+ * Supports both direct browser access (returns HTML with auto-redirect)
+ * and API access (returns JSON with payment URL)
+ */
+const processPaymentRequest = async (req, res) => {
+  try {
+    // Check if request is coming from a browser or API
+    // If Accept header contains 'application/json', return JSON response
+    // Otherwise, return HTML with auto-redirect
+    const wantsJson = req.get('Accept') && 
+                     req.get('Accept').includes('application/json');
+    
+    // Query parameter can override header-based detection
+    const responseType = req.query.responseType || (wantsJson ? 'json' : 'html');
+    
+    // Extract parameters from query string - these are the three main parameters we need to store
+    const { domain, amount, merchantOrderId, name, mobile } = req.query;
+    
+    // Log incoming parameters for debugging
+    console.log("processPaymentRequest received params:", { 
+      domain, 
+      amount, 
+      merchantOrderId, // Explicitly log merchantOrderId
+      name, 
+      mobile,
+      responseType
+    });
+    
+    // Validate required parameters
+    if (!domain) {
+      if (responseType === 'json') {
+        return res.status(400).json({
+          success: false,
+          message: "Domain name is required"
+        });
+      } else {
+        return res.status(400).send(`
+          <html><body>
+            <h1>Error: Missing domain</h1>
+            <p>Please provide a valid domain name.</p>
+            <a href="/">Return to home</a>
+          </body></html>
+        `);
+      }
+    }
+    
+    // Validate amount
+    const paymentAmount = parseFloat(amount);
+    if (isNaN(paymentAmount) || paymentAmount <= 0) {
+      if (responseType === 'json') {
+        return res.status(400).json({
+          success: false,
+          message: "Valid payment amount is required"
+        });
+      } else {
+        return res.status(400).send(`
+          <html><body>
+            <h1>Error: Invalid amount</h1>
+            <p>Please provide a valid payment amount.</p>
+            <a href="/">Return to home</a>
+          </body></html>
+        `);
+      }
+    }
+    
+    // Generate a unique order ID or use the provided merchantOrderId
+    // Create unique crypto for additional randomness if merchantOrderId isn't provided
+    const uniqueId = crypto.randomBytes(4).toString('hex');
+    const orderId = merchantOrderId || `URL-${Date.now()}-${uniqueId}`;
+    
+    console.log(`Creating payment with orderId: ${orderId} for domain: ${domain}, amount: ${paymentAmount}`);
+    
+    // IMPORTANT: Store all three required parameters in the database
+    try {
+      const savedPayment = await paymentService.createPayment({
+        orderId,                    // This will be merchantOrderId if provided
+        domainName: domain,         // Store domain parameter
+        amount: paymentAmount,      // Store amount parameter
+        paymentDetails: { 
+          name: name || "Customer", 
+          mobile: mobile || "",
+          source: "URL_PAYMENT",
+          createdAt: new Date().toISOString(),
+          // Store original query parameters explicitly for reference
+          queryParams: {
+            domain,
+            amount,
+            merchantOrderId: merchantOrderId || null,  // Store null if not provided
+          }
+        }
+      });
+      console.log(`Successfully created payment record in database with ID: ${savedPayment._id}`);
+    } catch (dbError) {
+      // Log the error but continue with payment processing
+      console.error("Database error while creating payment:", dbError);
+    }
+    
+    // Get auth token for PhonePe API
+    const authToken = await authService.getAuthToken();
+    if (!authToken) {
+      console.error("Failed to get auth token from PhonePe");
+      if (responseType === 'json') {
+        return res.status(500).json({
+          success: false, 
+          message: "Authentication failed with payment gateway"
+        });
+      } else {
+        return res.status(500).send(`
+          <html><body>
+            <h1>Error: Authentication failed</h1>
+            <p>We couldn't authenticate with the payment gateway. Please try again later.</p>
+            <a href="/">Return to home</a>
+          </body></html>
+        `);
+      }
+    }
+    
+    // Create payment payload for PhonePe
+    const paymentPayload = {
+      merchantOrderId: orderId,
+      amount: Math.round(paymentAmount * 100), // Convert to paisa
+      expireAfter: 1800, // 30 minutes
+      metaInfo: {
+        udf1: domain,
+        udf2: name || "Customer",
+        udf3: "URL_PAYMENT"
+      },
+      paymentFlow: {
+        type: "PG_CHECKOUT",
+        message: `Payment for ${domain}`,
+        merchantUrls: {
+          redirectUrl: `${req.protocol}://${req.get('host')}/api/phonepay/payment-status?txnId=${orderId}&clientDomain=${encodeURIComponent(domain)}`,
+          cancelUrl: `${req.protocol}://${req.get('host')}/api/phonepay/payment-cancelled?txnId=${orderId}`,
+          notifyUrl: `${req.protocol}://${req.get('host')}/api/phonepay/notify`
+        },
+        paymentModeConfig: {
+          enabledPaymentModes: [
+            { type: "UPI_INTENT" },
+            { type: "UPI_COLLECT" },
+            { type: "UPI_QR" },
+            { type: "NET_BANKING" },
+            {
+              type: "CARD",
+              cardTypes: ["DEBIT_CARD", "CREDIT_CARD"]
+            }
+          ]
+        }
+      },
+      userInfo: {
+        name: name || "Customer",
+        mobileNumber: mobile || ""
+      }
+    };
+    
+    console.log("Processing URL payment request to PhonePe:", JSON.stringify(paymentPayload, null, 2));
+    
+    // Send request to PhonePe
+    const response = await axios({
+      method: "POST",
+      url: `${BASE_URL}/checkout/v2/pay`,
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `O-Bearer ${authToken}`
+      },
+      data: paymentPayload
+    });
+    
+    console.log("PhonePe API response:", JSON.stringify(response.data, null, 2));
+    
+    if (!response.data || !response.data.redirectUrl) {
+      if (responseType === 'json') {
+        return res.status(500).json({
+          success: false,
+          message: "No redirect URL received from payment gateway"
+        });
+      } else {
+        return res.status(500).send(`
+          <html><body>
+            <h1>Error: Payment setup failed</h1>
+            <p>We couldn't set up your payment. Please try again later.</p>
+            <a href="/">Return to home</a>
+          </body></html>
+        `);
+      }
+    }
+    
+    // If user wants JSON response, provide payment details as JSON
+    if (responseType === 'json') {
+      return res.status(200).json({
+        success: true,
+        orderId: orderId,
+        paymentUrl: response.data.redirectUrl,
+        amount: paymentAmount,
+        domain: domain,
+        state: response.data.state || "CREATED",
+        message: "Payment link generated successfully"
+      });
+    } else {
+      // IMPORTANT CHANGE: For HTML responses, directly return the PhonePe redirect URL
+      // with a 200 status code using the <meta refresh> tag for immediate redirect
+      const redirectHtml = `
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+          <meta charset="UTF-8">
+          <meta http-equiv="refresh" content="0;url=${response.data.redirectUrl}">
+          <title>Redirecting to Payment...</title>
+          <script>
+            // JavaScript immediate redirect as fallback
+            window.location.href = "${response.data.redirectUrl}";
+          </script>
+          <style>
+            body {
+              font-family: Arial, sans-serif;
+              display: flex;
+              flex-direction: column;
+              justify-content: center;
+              align-items: center;
+              height: 100vh;
+              margin: 0;
+              background-color: #f7f7f7;
+              text-align: center;
+            }
+            .container {
+              max-width: 500px;
+              padding: 20px;
+              background: white;
+              border-radius: 8px;
+              box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            }
+            .loader {
+              border: 5px solid #f3f3f3;
+              border-top: 5px solid #3498db;
+              border-radius: 50%;
+              width: 50px;
+              height: 50px;
+              animation: spin 1s linear infinite;
+              margin: 20px auto;
+            }
+            @keyframes spin {
+              0% { transform: rotate(0deg); }
+              100% { transform: rotate(360deg); }
+            }
+            .btn {
+              background-color: #4CAF50;
+              color: white;
+              padding: 10px 15px;
+              border: none;
+              border-radius: 4px;
+              cursor: pointer;
+              font-size: 16px;
+              margin-top: 15px;
+              text-decoration: none;
+              display: inline-block;
+            }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <h2>Redirecting to Payment...</h2>
+            <div class="loader"></div>
+            <p>If you're not redirected automatically, please click the button below:</p>
+            <a href="${response.data.redirectUrl}" class="btn">Go to Payment Page</a>
+          </div>
+        </body>
+        </html>
+      `;
+      
+      // Return 200 OK with HTML that will immediately redirect to PhonePe
+      return res.status(200).send(redirectHtml);
+    }
+    
+  } catch (error) {
+    console.error("Error processing URL payment request:", error);
+    
+    if (error.response) {
+      console.error("API response status:", error.response.status);
+      console.error("API response data:", JSON.stringify(error.response.data, null, 2));
+    }
+    
+    // Determine response format based on Accept header
+    const wantsJson = req.get('Accept') && req.get('Accept').includes('application/json');
+    const responseType = req.query.responseType || (wantsJson ? 'json' : 'html');
+    
+    if (responseType === 'json') {
+      return res.status(500).json({
+        success: false,
+        message: "Failed to process payment request",
+        error: error.message
+      });
+    } else {
+      return res.status(500).send(`
+        <html><body>
+          <h1>Payment Processing Error</h1>
+          <p>Error: ${error.message}</p>
+          <a href="/">Return to home</a>
+        </body></html>
+      `);
+    }
+  }
+};
+
 module.exports = {
   createOrder,
   createOrderToken,
@@ -1237,6 +1428,6 @@ module.exports = {
   processPaymentRequest,
   handlePaymentStatus,
   handlePaymentCancelled,
-  processCheckoutPayment,
-  showPaymentError
+  showPaymentError,
+  processCheckoutPayment
 };

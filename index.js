@@ -18,7 +18,7 @@ const connectDB = require("./src/common/utils/db");
 // phonepeRoutes contains all API endpoints for payment processing
 const phonepeRoutes = require("./src/phonepay/routes/phonepeRoutes");
 // Import specific controller functions for standalone payment pages
-const { serveUniquePage, serveMultiPaymentPage } = require("./src/phonepay/controllers/phonepeController"); 
+const { serveUniquePage, serveMultiPaymentPage, processPaymentRequest } = require("./src/phonepay/controllers/phonepeController"); 
 
 // Initialize Express application
 const app = express();
@@ -40,6 +40,10 @@ app.use(cors({
 
 // Add specific OPTIONS handler for all routes
 app.options('*', cors());  // Enable preflight for all routes
+
+// IMPORTANT: Register the process-payment route BEFORE serving static files
+// This ensures it will always return JSON and won't try to serve an HTML file
+app.get("/process-payment", processPaymentRequest);
 
 // Serve static files from the views directory
 // This allows direct access to HTML, CSS, and client-side JS files
@@ -71,14 +75,62 @@ app.use((err, req, res, next) => {
     res.status(500).send('Something broke!');
 });
 
-// Start the Express server
+// Start the Express server with improved error handling
 const PORT = process.env.PORT || 5001;
-app.listen(PORT, '0.0.0.0', () => {
+
+// Wrap server startup in try/catch to catch any initialization errors
+try {
+  // Check for port availability before starting
+  const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on port ${PORT}`);
     
     // Try to connect to MongoDB but don't make it critical for server startup
     connectDB().catch(error => {
-        console.error("Failed to connect to the database, but server will continue running:", error.message);
-        console.warn("Database-dependent features won't work until database connection is restored");
+      console.error("Failed to connect to the database, but server will continue running:", error.message);
+      console.warn("Database-dependent features won't work until database connection is restored");
     });
-});
+  });
+
+  // Handle server errors
+  server.on('error', (error) => {
+    if (error.code === 'EADDRINUSE') {
+      console.error(`Port ${PORT} is already in use. Try a different port.`);
+    } else {
+      console.error('Server error occurred:', error);
+    }
+    process.exit(1);
+  });
+
+  // Handle process termination
+  process.on('SIGTERM', () => {
+    console.log('SIGTERM received, shutting down gracefully');
+    server.close(() => {
+      console.log('Process terminated');
+    });
+  });
+
+  process.on('SIGINT', () => {
+    console.log('SIGINT received, shutting down gracefully');
+    server.close(() => {
+      console.log('Process terminated');
+    });
+  });
+
+  // Unhandled promise rejections
+  process.on('unhandledRejection', (reason, promise) => {
+    console.error('Unhandled Promise Rejection:', reason);
+  });
+
+  // Uncaught exceptions
+  process.on('uncaughtException', (error) => {
+    console.error('Uncaught Exception:', error);
+    // Don't exit immediately to allow logging to complete
+    setTimeout(() => {
+      process.exit(1);
+    }, 1000);
+  });
+
+} catch (startupError) {
+  console.error('Failed to start server:', startupError);
+  process.exit(1);
+}

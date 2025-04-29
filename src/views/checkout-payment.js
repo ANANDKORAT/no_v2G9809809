@@ -5,7 +5,8 @@
 
 // Configuration for payment processing
 const config = {
-  apiBaseUrl: 'http://localhost:5001/api/phonepay',  // Base URL for API endpoints
+  // Use dynamic host detection instead of hardcoded localhost
+  apiBaseUrl: window.PHONEPAY_API_URL || `${window.location.protocol}//${window.location.host}/api/phonepay`,
   debug: true  // Enable debugging logs
 };
 

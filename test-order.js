@@ -7,6 +7,9 @@ const axios = require('axios');
 // PhonePe API URL (Production endpoint)
 const BASE_URL = "https://api.phonepe.com/apis/pg";
 
+// Get server host from environment or use default
+const SERVER_HOST = process.env.APP_HOST || 'http://localhost:5001';
+
 /**
  * Gets an authentication token from PhonePe OAuth service
  * 
@@ -97,9 +100,9 @@ async function createTestOrder() {
         type: "PG_CHECKOUT",
         message: "Test Payment " + merchantOrderId,
         merchantUrls: {
-          redirectUrl: `http://localhost:5001/api/phonepay/status?txnId=${merchantOrderId}`,
-          cancelUrl: `http://localhost:5001/api/phonepay/payment-failed`,
-          notifyUrl: `http://localhost:5001/api/phonepay/notify`
+          redirectUrl: `${SERVER_HOST}/api/phonepay/status?txnId=${merchantOrderId}`,
+          cancelUrl: `${SERVER_HOST}/api/phonepay/payment-failed`,
+          notifyUrl: `${SERVER_HOST}/api/phonepay/notify`
         }
       },
       userInfo: {
