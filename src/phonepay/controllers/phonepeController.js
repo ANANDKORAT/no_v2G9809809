@@ -1237,6 +1237,6 @@ module.exports = {
   processPaymentRequest,
   handlePaymentStatus,
   handlePaymentCancelled,
-  // Add new function
+  processCheckoutPayment,
   showPaymentError
 };
